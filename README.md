@@ -57,3 +57,38 @@ Notes:
 - With redirection:
   - `printf "a:b:c\n1:2:3\n" | cut -d : -f 2 >out.txt`
   - `printf "X:Y:Z\n" | cut -d : -f 1 >>out.txt`
+
+
+## Part 3(b) – Chatroom (Named Pipes)
+
+Implemented a simple multi-user chat command using named pipes (FIFO).
+
+Usage:
+./chatroom <roomname> <username>
+
+Behavior:
+- Each chat room is represented as a directory under:
+  /tmp/chatroom-<roomname>/
+- Each user is represented by a named pipe inside the room directory:
+  /tmp/chatroom-<roomname>/<username>
+
+Features:
+- If the room does not exist, it is created automatically
+- If the user pipe does not exist, it is created automatically
+- A user continuously reads from their own named pipe
+- Messages typed by a user are broadcast to all other users in the room
+- Messages are displayed in the format:
+  [roomname] username: message
+
+Example:
+Terminal 1:
+./chatroom comp304 ali
+
+Terminal 2:
+./chatroom comp304 mehmet
+
+ali types:
+hello
+
+mehmet sees:
+[comp304] ali: hello
