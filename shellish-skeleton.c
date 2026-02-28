@@ -174,7 +174,7 @@ int parse_command(char *buf, struct command_t *command) {
         redirect_index = 1;
     }
     if (redirect_index != -1) {
-      command->redirects[redirect_index] = (char *)malloc(len);
+      command->redirects[redirect_index] = (char *)malloc(len+1);
       strcpy(command->redirects[redirect_index], arg + 1);
       continue;
     }
@@ -309,25 +309,229 @@ int prompt(struct command_t *command) {
 }
 
 int process_command(struct command_t *command) {
-  int r;
-  if (strcmp(command->name, "") == 0)
-    return SUCCESS;
+    int r;
+    if (strcmp(command->name, "") == 0)
+      return SUCCESS;
 
-  if (strcmp(command->name, "exit") == 0)
-    return EXIT;
+    if (strcmp(command->name, "exit") == 0)
+      return EXIT;
 
-  if (strcmp(command->name, "cd") == 0) {
-    if (command->arg_count > 0) {
-      r = chdir(command->args[1]);
-      if (r == -1)
-        printf("-%s: %s: %s\n", sysname, command->name, strerror(errno));
+    if (strcmp(command->name, "cd") == 0) {
+      if (command->arg_count > 0) {
+        r = chdir(command->args[1]);
+        if (r == -1)
+          printf("-%s: %s: %s\n", sysname, command->name, strerror(errno));
+      }
       return SUCCESS;
     }
+	// PART2 Pipe Case
+    if (command->next != NULL) {
+    int fd[2];
+    if (pipe(fd) < 0) {
+      printf("-%s: pipe failed: %s\n", sysname, strerror(errno));
+      return SUCCESS;
+    }
+
+
+    pid_t p1 = fork();
+    if (p1 == 0) {
+      // child 1 stdout pipe wrİte end
+     if (dup2(fd[1], STDOUT_FILENO) < 0) exit(1);
+      close(fd[0]);
+      close(fd[1]);
+
+      // (opsiyonel) child1 için sadece input redirection (<) uygula
+      if (command->redirects[0]) {
+        int fd_in = open(command->redirects[0], O_RDONLY);
+        if (fd_in < 0) {
+          printf("-%s: cannot open input file %s: %s\n",
+                 sysname, command->redirects[0], strerror(errno));
+          exit(1);
+        }
+        if (dup2(fd_in, STDIN_FILENO) < 0) {
+          printf("-%s: dup2 failed (input): %s\n", sysname, strerror(errno));
+          close(fd_in);
+          exit(1);
+        }
+        close(fd_in);
+      }
+
+      // execv ile PATH çözümleme (child içinde)
+      char *path = getenv("PATH");
+      if (!path) path = "";
+      char *copy = strdup(path);
+      if (!copy) exit(1);
+
+      char *dir = strtok(copy, ":");
+      while (dir != NULL) {
+        char fullpath[1024];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, command->name);
+
+        if (access(fullpath, X_OK) == 0) {
+          execv(fullpath, command->args);
+          break; // execv dönerse hata
+        }
+        dir = strtok(NULL, ":");
+      }
+      free(copy);
+
+      printf("-%s: %s: command not found\n", sysname, command->name);
+      exit(127);
+    }
+
+    pid_t p2 = fork();
+    if (p2 == 0) {
+      // child 2: stdin <- pipe read end
+      if (dup2(fd[0], STDIN_FILENO) < 0) exit(1);
+      close(fd[1]);
+      close(fd[0]);
+
+      // child2 için output redirection (> / >>) mantıklı: cmd1 | cmd2 >out
+      if (command->next->redirects[1]) {
+        int fd_out = open(command->next->redirects[1],
+                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd_out < 0) {
+          printf("-%s: cannot open output file %s: %s\n",
+                 sysname, command->next->redirects[1], strerror(errno));
+          exit(1);
+        }
+        if (dup2(fd_out, STDOUT_FILENO) < 0) {
+          printf("-%s: dup2 failed (output): %s\n", sysname, strerror(errno));
+          close(fd_out);
+          exit(1);
+        }
+        close(fd_out);
+      }
+
+      if (command->next->redirects[2]) {
+        int fd_app = open(command->next->redirects[2],
+                          O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd_app < 0) {
+          printf("-%s: cannot open append file %s: %s\n",
+                 sysname, command->next->redirects[2], strerror(errno));
+          exit(1);
+        }
+        if (dup2(fd_app, STDOUT_FILENO) < 0) {
+          printf("-%s: dup2 failed (append): %s\n", sysname, strerror(errno));
+          close(fd_app);
+          exit(1);
+        }
+        close(fd_app);
+      }
+
+      // (opsiyonel) cmd2 için input redirection (<) da desteklemek istersen:
+      if (command->next->redirects[0]) {
+        int fd_in2 = open(command->next->redirects[0], O_RDONLY);
+        if (fd_in2 < 0) {
+          printf("-%s: cannot open input file %s: %s\n",
+                 sysname, command->next->redirects[0], strerror(errno));
+          exit(1);
+        }
+        if (dup2(fd_in2, STDIN_FILENO) < 0) {
+          printf("-%s: dup2 failed (input): %s\n", sysname, strerror(errno));
+          close(fd_in2);
+          exit(1);
+        }
+        close(fd_in2);
+      }
+
+      // execv ile PATH çözümleme (child2)
+      char *path2 = getenv("PATH");
+      if (!path2) path2 = "";
+      char *copy2 = strdup(path2);
+      if (!copy2) exit(1);
+
+      char *dir2 = strtok(copy2, ":");
+      while (dir2 != NULL) {
+        char fullpath2[1024];
+        snprintf(fullpath2, sizeof(fullpath2), "%s/%s", dir2, command->next->name);
+
+        if (access(fullpath2, X_OK) == 0) {
+          execv(fullpath2, command->next->args);
+          break;
+        }
+        dir2 = strtok(NULL, ":");
+      }
+      free(copy2);
+
+      printf("-%s: %s: command not found\n", sysname, command->next->name);
+      exit(127);
+    }
+
+    close(fd[0]);
+    close(fd[1]);
+
+    waitpid(p1, NULL, 0);
+    waitpid(p2, NULL, 0);
+
+    if (!command->background) {
+      waitpid(p1, NULL, 0);
+      waitpid(p2, NULL, 0);
+    }
+
+    return SUCCESS;
   }
+
 
   pid_t pid = fork();
   if (pid == 0) // child
   {
+    //PART2 I/O Redirection
+    // redirects[0] : input  (<file)
+    // redirects[1] : output (>file) truncate
+    // redirects[2] : output (>>file) append
+
+   if (command->redirects[0]) {
+      int fd_in = open(command->redirects[0], O_RDONLY);
+      if (fd_in < 0) {
+        printf("-%s: cannot open input file %s: %s\n",
+               sysname, command->redirects[0], strerror(errno));
+        exit(1);
+      }
+      if (dup2(fd_in, STDIN_FILENO) < 0) {
+        printf("-%s: dup2 failed (input): %s\n", sysname, strerror(errno));
+        close(fd_in);
+        exit(1);
+      }
+      close(fd_in);
+    }
+
+    //if > and >> together, last one will win so first > then >> 
+    if (command->redirects[1]) {
+      int fd_out = open(command->redirects[1],
+                        O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (fd_out < 0) {
+        printf("-%s: cannot open output file %s: %s\n",
+               sysname, command->redirects[1], strerror(errno));
+        exit(1);
+      }
+      if (dup2(fd_out, STDOUT_FILENO) < 0) {
+        printf("-%s: dup2 failed (output): %s\n", sysname, strerror(errno));
+        close(fd_out);
+        exit(1);
+      }
+      close(fd_out);
+    }
+
+    if (command->redirects[2]) {
+      int fd_app = open(command->redirects[2],
+                        O_WRONLY | O_CREAT | O_APPEND, 0644);
+      if (fd_app < 0) {
+        printf("-%s: cannot open append file %s: %s\n",
+               sysname, command->redirects[2], strerror(errno));
+        exit(1);
+      }
+      if (dup2(fd_app, STDOUT_FILENO) < 0) {
+        printf("-%s: dup2 failed (append): %s\n", sysname, strerror(errno));
+        close(fd_app);
+        exit(1);
+      }
+      close(fd_app);
+    }
+
+    //end redirecion
+
+
     /// This shows how to do exec with environ (but is not available on MacOs)
     // extern char** environ; // environment variables
     // execvpe(command->name, command->args, environ); // exec+args+path+environ
@@ -364,7 +568,7 @@ int process_command(struct command_t *command) {
     // TODO: implement background processes here
     	if( !command->background) {
 		waitpid(pid,NULL,0);// if nor background , wait for child
-        } 
+        }
 
         return SUCCESS;
  }
