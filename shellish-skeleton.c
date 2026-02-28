@@ -145,6 +145,7 @@ int parse_command(char *buf, struct command_t *command) {
     if (strcmp(arg, "|") == 0) {
       struct command_t *c =
           (struct command_t *)malloc(sizeof(struct command_t));
+	  memset(c, 0, sizeof(struct command_t));
       int l = strlen(pch);
       pch[l] = splitters[0]; // restore strtok termination
       index = 1;
@@ -308,6 +309,194 @@ int prompt(struct command_t *command) {
   return SUCCESS;
 }
 
+
+//  PART3(a): builtin cut
+
+static int parse_fields(const char *s, int **out_fields, int *out_n) {
+  // s: "1,3,10"
+  int cap = 8, n = 0;
+  int *arr = malloc(sizeof(int) * cap);
+  if (!arr) return -1;
+
+  const char *p = s;
+  while (*p) {
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) break;
+
+    char *endptr = NULL;
+    long v = strtol(p, &endptr, 10);
+    if (endptr == p) { // not a number
+      free(arr);
+      return -1;
+    }
+    if (v <= 0) {
+      free(arr);
+      return -1;
+    }
+    if (n >= cap) {
+      cap *= 2;
+      int *tmp = realloc(arr, sizeof(int) * cap);
+      if (!tmp) { free(arr); return -1; }
+      arr = tmp;
+    }
+    arr[n++] = (int)v;
+
+    p = endptr;
+    if (*p == ',') p++;
+    else if (*p) {
+      // allow trailing spaces, otherwise invalid
+      while (*p == ' ' || *p == '\t') p++;
+      if (*p == ',') p++;
+      else if (*p != '\0') { free(arr); return -1; }
+    }
+  }
+
+  if (n == 0) { free(arr); return -1; }
+  *out_fields = arr;
+  *out_n = n;
+  return 0;
+}
+
+static void split_preserve_empty(char *line, char delim, char ***out_parts, int *out_cnt) {
+  // line is mutable; we split in-place but preserve empty fields
+  int cap = 16, cnt = 0;
+  char **parts = malloc(sizeof(char*) * cap);
+  if (!parts) { *out_parts = NULL; *out_cnt = 0; return; }
+
+  char *start = line;
+  for (char *p = line; ; p++) {
+    if (*p == delim || *p == '\n' || *p == '\0') {
+      if (cnt >= cap) {
+        cap *= 2;
+        char **tmp = realloc(parts, sizeof(char*) * cap);
+        if (!tmp) break;
+        parts = tmp;
+      }
+      parts[cnt++] = start;
+
+      if (*p == '\n' || *p == '\0') {
+        *p = '\0';
+        break;
+      }
+      *p = '\0';
+      start = p + 1;
+    }
+  }
+
+  *out_parts = parts;
+  *out_cnt = cnt;
+}
+
+static int builtin_cut(struct command_t *command) {
+  // Supported:
+  // -d X / --delimiter X   (single char)
+  // -f list / --fields list  (comma-separated 1-based indices)
+  char delim = '\t';
+  int *fields = NULL, nfields = 0;
+
+  // args: command->args[0] = "cut"
+  // real args are [1 .. arg_count-2]
+  for (int i = 1; i < command->arg_count - 1; i++) {
+    char *a = command->args[i];
+    if (!a) break;
+
+    if (strcmp(a, "-d") == 0 || strcmp(a, "--delimiter") == 0) {
+      if (i + 1 >= command->arg_count - 1) {
+        fprintf(stderr, "cut: missing delimiter after %s\n", a);
+        return 1;
+      }
+      char *d = command->args[++i];
+      if (!d || strlen(d) != 1) {
+        fprintf(stderr, "cut: delimiter must be a single character\n");
+        return 1;
+      }
+      delim = d[0];
+    } else if (strcmp(a, "-f") == 0 || strcmp(a, "--fields") == 0) {
+      if (i + 1 >= command->arg_count - 1) {
+        fprintf(stderr, "cut: missing fields list after %s\n", a);
+        return 1;
+      }
+      char *flist = command->args[++i];
+      if (parse_fields(flist, &fields, &nfields) != 0) {
+        fprintf(stderr, "cut: invalid fields list: %s\n", flist);
+        return 1;
+      }
+    } else {
+      // ignore unknown options or treat as error 
+      fprintf(stderr, "cut: unknown option: %s\n", a);
+      free(fields);
+      return 1;
+    }
+  }
+
+  if (!fields) {
+    fprintf(stderr, "cut: fields are required. Use -f 1,3,...\n");
+    return 1;
+  }
+
+  char *line = NULL;
+  size_t cap = 0;
+
+  while (1) {
+    ssize_t r = getline(&line, &cap, stdin);
+    if (r ==-1) break;
+
+    // split line into fields (preserve empty)
+    char **parts = NULL;
+    int nparts = 0;
+    split_preserve_empty(line, delim, &parts, &nparts);
+
+    for (int k = 0; k < nfields; k++) {
+      int idx = fields[k]; // 1-based
+      if (k > 0) putchar(delim);
+
+      if (idx >= 1 && idx <= nparts) {
+        fputs(parts[idx - 1], stdout);
+      }
+    }
+    putchar('\n');
+
+    free(parts);
+  }
+
+  free(fields);
+  free(line);
+  return 0;
+}
+
+// PATH resolve + execv for external commands
+static void exec_external(struct command_t *cmd) {
+  char *path = getenv("PATH");
+  if (!path) path = "";
+
+  char *copy = strdup(path);
+  if (!copy) exit(1);
+
+  char *dir = strtok(copy, ":");
+  while (dir != NULL) {
+    char fullpath[1024];
+    snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, cmd->name);
+
+    if (access(fullpath, X_OK) == 0) {
+      execv(fullpath, cmd->args);
+    }
+    dir = strtok(NULL, ":");
+  }
+  free(copy);
+
+  printf("-%s: %s: command not found\n", sysname, cmd->name);
+  exit(127);
+}
+
+// run in child: builtin or external?
+static void run_command_child(struct command_t *cmd) {
+  if (strcmp(cmd->name, "cut") == 0) {
+    int rc = builtin_cut(cmd);
+    exit(rc);
+  }
+  exec_external(cmd);
+}
+
 int process_command(struct command_t *command) {
     int r;
     if (strcmp(command->name, "") == 0)
@@ -340,7 +529,7 @@ int process_command(struct command_t *command) {
       close(fd[0]);
       close(fd[1]);
 
-      // (opsiyonel) child1 için sadece input redirection (<) uygula
+      //  for child1 just input redirection (<)
       if (command->redirects[0]) {
         int fd_in = open(command->redirects[0], O_RDONLY);
         if (fd_in < 0) {
@@ -348,36 +537,11 @@ int process_command(struct command_t *command) {
                  sysname, command->redirects[0], strerror(errno));
           exit(1);
         }
-        if (dup2(fd_in, STDIN_FILENO) < 0) {
-          printf("-%s: dup2 failed (input): %s\n", sysname, strerror(errno));
-          close(fd_in);
-          exit(1);
-        }
+        if (dup2(fd_in, STDIN_FILENO) < 0) exit(1);
         close(fd_in);
       }
-
-      // execv ile PATH çözümleme (child içinde)
-      char *path = getenv("PATH");
-      if (!path) path = "";
-      char *copy = strdup(path);
-      if (!copy) exit(1);
-
-      char *dir = strtok(copy, ":");
-      while (dir != NULL) {
-        char fullpath[1024];
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, command->name);
-
-        if (access(fullpath, X_OK) == 0) {
-          execv(fullpath, command->args);
-          break; // execv dönerse hata
-        }
-        dir = strtok(NULL, ":");
-      }
-      free(copy);
-
-      printf("-%s: %s: command not found\n", sysname, command->name);
-      exit(127);
-    }
+      run_command_child(command);
+     }
 
     pid_t p2 = fork();
     if (p2 == 0) {
@@ -386,7 +550,7 @@ int process_command(struct command_t *command) {
       close(fd[1]);
       close(fd[0]);
 
-      // child2 için output redirection (> / >>) mantıklı: cmd1 | cmd2 >out
+      // for child2 output redirection (> / >>) cmd1 | cmd2 >out
       if (command->next->redirects[1]) {
         int fd_out = open(command->next->redirects[1],
                           O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -395,13 +559,10 @@ int process_command(struct command_t *command) {
                  sysname, command->next->redirects[1], strerror(errno));
           exit(1);
         }
-        if (dup2(fd_out, STDOUT_FILENO) < 0) {
-          printf("-%s: dup2 failed (output): %s\n", sysname, strerror(errno));
-          close(fd_out);
-          exit(1);
-        }
+        if (dup2(fd_out, STDOUT_FILENO) < 0) exit(1);
         close(fd_out);
       }
+
 
       if (command->next->redirects[2]) {
         int fd_app = open(command->next->redirects[2],
@@ -411,58 +572,14 @@ int process_command(struct command_t *command) {
                  sysname, command->next->redirects[2], strerror(errno));
           exit(1);
         }
-        if (dup2(fd_app, STDOUT_FILENO) < 0) {
-          printf("-%s: dup2 failed (append): %s\n", sysname, strerror(errno));
-          close(fd_app);
-          exit(1);
-        }
+        if (dup2(fd_app, STDOUT_FILENO) < 0) exit(1);
         close(fd_app);
       }
-
-      // (opsiyonel) cmd2 için input redirection (<) da desteklemek istersen:
-      if (command->next->redirects[0]) {
-        int fd_in2 = open(command->next->redirects[0], O_RDONLY);
-        if (fd_in2 < 0) {
-          printf("-%s: cannot open input file %s: %s\n",
-                 sysname, command->next->redirects[0], strerror(errno));
-          exit(1);
-        }
-        if (dup2(fd_in2, STDIN_FILENO) < 0) {
-          printf("-%s: dup2 failed (input): %s\n", sysname, strerror(errno));
-          close(fd_in2);
-          exit(1);
-        }
-        close(fd_in2);
-      }
-
-      // execv ile PATH çözümleme (child2)
-      char *path2 = getenv("PATH");
-      if (!path2) path2 = "";
-      char *copy2 = strdup(path2);
-      if (!copy2) exit(1);
-
-      char *dir2 = strtok(copy2, ":");
-      while (dir2 != NULL) {
-        char fullpath2[1024];
-        snprintf(fullpath2, sizeof(fullpath2), "%s/%s", dir2, command->next->name);
-
-        if (access(fullpath2, X_OK) == 0) {
-          execv(fullpath2, command->next->args);
-          break;
-        }
-        dir2 = strtok(NULL, ":");
-      }
-      free(copy2);
-
-      printf("-%s: %s: command not found\n", sysname, command->next->name);
-      exit(127);
-    }
+      run_command_child(command->next);
+     }
 
     close(fd[0]);
     close(fd[1]);
-
-    waitpid(p1, NULL, 0);
-    waitpid(p2, NULL, 0);
 
     if (!command->background) {
       waitpid(p1, NULL, 0);
@@ -470,8 +587,7 @@ int process_command(struct command_t *command) {
     }
 
     return SUCCESS;
-  }
-
+}
 
   pid_t pid = fork();
   if (pid == 0) // child
@@ -488,13 +604,11 @@ int process_command(struct command_t *command) {
                sysname, command->redirects[0], strerror(errno));
         exit(1);
       }
-      if (dup2(fd_in, STDIN_FILENO) < 0) {
-        printf("-%s: dup2 failed (input): %s\n", sysname, strerror(errno));
-        close(fd_in);
-        exit(1);
-      }
+      if (dup2(fd_in, STDIN_FILENO) < 0) exit(1);
       close(fd_in);
+
     }
+
 
     //if > and >> together, last one will win so first > then >> 
     if (command->redirects[1]) {
@@ -505,12 +619,8 @@ int process_command(struct command_t *command) {
                sysname, command->redirects[1], strerror(errno));
         exit(1);
       }
-      if (dup2(fd_out, STDOUT_FILENO) < 0) {
-        printf("-%s: dup2 failed (output): %s\n", sysname, strerror(errno));
-        close(fd_out);
-        exit(1);
-      }
-      close(fd_out);
+      if (dup2(fd_out, STDOUT_FILENO) < 0)  exit(1);
+     close(fd_out);
     }
 
     if (command->redirects[2]) {
@@ -521,14 +631,19 @@ int process_command(struct command_t *command) {
                sysname, command->redirects[2], strerror(errno));
         exit(1);
       }
-      if (dup2(fd_app, STDOUT_FILENO) < 0) {
-        printf("-%s: dup2 failed (append): %s\n", sysname, strerror(errno));
-        close(fd_app);
-        exit(1);
-      }
+      if (dup2(fd_app, STDOUT_FILENO) < 0) exit(1);
       close(fd_app);
     }
-
+    run_command_child(command);
+    exit(1);
+    }
+    else{
+	if(!command->background){
+	   waitpid(pid,NULL,0);
+	}
+	return SUCCESS;
+    }
+}
     //end redirecion
 
 
@@ -544,36 +659,6 @@ int process_command(struct command_t *command) {
     // do so by replacing the execvp call below
     // exec+args+path
 
-	//used PATH environment var and execute with execv
-    char *path= getenv("PATH");
-    char *copy= strdup(path);
-
-    char *dir =strtok(copy, ":");
-	//search each dir in PATH for executable command
-    while (dir != NULL){
-   	char fullpath[1024];
-	sprintf(fullpath, "%s/%s", dir, command->name);
-
-	if(access(fullpath, X_OK)==0){
-		execv(fullpath, command->args);//if exists, run it
-        }
-	dir= strtok(NULL,":");
-    }
-    free(copy);
-
-    printf("-%s: %s: command not found\n", sysname, command->name);
-    exit(127);
-  }
- else {
-    // TODO: implement background processes here
-    	if( !command->background) {
-		waitpid(pid,NULL,0);// if nor background , wait for child
-        }
-
-        return SUCCESS;
- }
-}
-
 int main() {
   while (1) {
     struct command_t *command =
@@ -582,8 +667,10 @@ int main() {
 
     int code;
     code = prompt(command);
-    if (code == EXIT)
-      break;
+    if (code == EXIT){
+     free_commanmd(command);
+     break;
+    }
 
     code = process_command(command);
     if (code == EXIT)
