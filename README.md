@@ -92,3 +92,13 @@ hello
 
 mehmet sees:
 [comp304] ali: hello
+
+## Part 3(c) – Custom Command: reverse
+
+`reverse` reads input from stdin and prints each line reversed.
+It works with piping and redirection.
+
+Example tests:
+- `echo hello | reverse`  -> `olleh`
+- `cat file.txt | reverse`
+- `echo hello | reverse >out.txt`

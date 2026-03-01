@@ -464,6 +464,39 @@ static int builtin_cut(struct command_t *command) {
   return 0;
 }
 
+
+// PART3(c): Custom Command - reverse
+static int builtin_reverse(struct command_t *cmd) {
+  (void)cmd;
+
+  char *line = NULL;
+  size_t cap = 0;
+
+  while (1) {
+    ssize_t r = getline(&line, &cap, stdin);
+    if (r == -1) break;
+
+    // r character read, line[r-1] generally '\n'
+    // '\n' exists we will write to end but not reverse
+    int has_nl = 0;
+    if (r > 0 && line[r - 1] == '\n') {
+      has_nl = 1;
+      line[r - 1] = '\0';
+      r--;
+    }
+
+    // line[0..r-1] reverse
+    for (ssize_t i = r - 1; i >= 0; i--) {
+      putchar(line[i]);
+    }
+    if (has_nl) putchar('\n');
+    else putchar('\n'); // if no newline
+  }
+
+  free(line);
+  return 0;
+}
+
 // PATH resolve + execv for external commands
 static void exec_external(struct command_t *cmd) {
   char *path = getenv("PATH");
@@ -494,6 +527,12 @@ static void run_command_child(struct command_t *cmd) {
     int rc = builtin_cut(cmd);
     exit(rc);
   }
+
+   if (strcmp(cmd->name, "reverse") == 0) {
+    int rc = builtin_reverse(cmd);
+    exit(rc);
+  }
+
   exec_external(cmd);
 }
 
@@ -668,7 +707,7 @@ int main() {
     int code;
     code = prompt(command);
     if (code == EXIT){
-     free_commanmd(command);
+     free_command(command);
      break;
     }
 
